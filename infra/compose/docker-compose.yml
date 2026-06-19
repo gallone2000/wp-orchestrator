@@ -1,0 +1,130 @@
+services:
+  librechat:
+    container_name: wp-librechat
+    image: ghcr.io/danny-avila/librechat:chart-1.9.7
+    restart: unless-stopped
+    ports:
+      - "3080:3080"
+    depends_on:
+      - mongodb
+      - meilisearch
+      - vectordb
+      - rag_api
+      - ollama
+      - wp-mcp
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3080
+      MONGO_URI: mongodb://mongodb:27017/librechat
+      MEILI_HOST: http://meilisearch:7700
+      MEILI_MASTER_KEY: meili_master_key_change_me
+      RAG_PORT: 8000
+      RAG_API_URL: http://rag_api:8000
+      CONFIG_PATH: /app/librechat.yaml
+      ALLOW_REGISTRATION: "true"
+      ALLOW_SOCIAL_LOGIN: "false"
+      OPENAI_API_KEY: dummy
+      JWT_SECRET: change_me_jwt_secret_please
+      JWT_REFRESH_SECRET: change_me_jwt_refresh_secret_please
+      CREDS_KEY: change_me_creds_key_please
+    volumes:
+      - ../../apps/librechat/librechat.yaml:/app/librechat.yaml:ro
+      - librechat-images:/app/client/public/images
+      - librechat-uploads:/app/uploads
+      - librechat-logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  mongodb:
+    container_name: wp-librechat-mongodb
+    image: mongo:8.0.17
+    restart: unless-stopped
+    command: mongod --noauth
+    volumes:
+      - mongodb-data:/data/db
+
+  meilisearch:
+    container_name: wp-librechat-meilisearch
+    image: getmeili/meilisearch:v1.35.1
+    restart: unless-stopped
+    environment:
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_MASTER_KEY: meili_master_key_change_me
+    volumes:
+      - meili-data:/meili_data
+
+  vectordb:
+    container_name: wp-librechat-vectordb
+    image: pgvector/pgvector:0.8.0-pg15-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mydatabase
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  rag_api:
+    container_name: wp-librechat-rag-api
+    image: ghcr.io/danny-avila/librechat-rag-api-dev-lite:v0.7.2
+    restart: unless-stopped
+    depends_on:
+      - vectordb
+    environment:
+      DB_HOST: vectordb
+      RAG_PORT: 8000
+
+  ollama:
+    container_name: wp-ollama
+    image: ollama/ollama:0.18.1
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+  wp-mcp:
+    container_name: wp-mcp
+    build:
+      context: ../..
+      dockerfile: mcp-server/Dockerfile
+    restart: unless-stopped
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8000
+      KUBECONFIG: /root/.kube/config
+      KUBE_CONTEXT: ${KUBE_CONTEXT:-}
+      BASE_DOMAIN: ${BASE_DOMAIN:-wordpress.local}
+      INGRESS_CLASS_NAME: nginx
+      MARIADB_IMAGE: mariadb:11.8.6
+      WORDPRESS_IMAGE: wordpress:php8.5-apache
+      MARIADB_SERVICE_PORT: 3306
+      WORDPRESS_SERVICE_PORT: 80
+      MARIADB_REPLICA_COUNT: 1
+      WORDPRESS_REPLICA_COUNT: 1
+      MARIADB_DATABASE: wordpress
+      WORDPRESS_DB_USER: root
+      MARIADB_PVC_SIZE: 1Gi
+      WORDPRESS_PVC_SIZE: 1Gi
+    volumes:
+      - ${HOST_KUBE_DIR:?Set HOST_KUBE_DIR in infra/compose/.env}:/root/.kube:ro
+    expose:
+      - "8000"
+    networks:
+      - default
+      - minikube-net
+
+volumes:
+  mongodb-data:
+  meili-data:
+  pgdata:
+  librechat-images:
+  librechat-uploads:
+  librechat-logs:
+  ollama-data:
+
+networks:
+  minikube-net:
+    external: true
+    name: minikube

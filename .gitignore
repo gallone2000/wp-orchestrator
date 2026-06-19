@@ -1,0 +1,28 @@
+# environment files (contain secrets and local paths)
+infra/compose/.env
+mcp-server/.env
+
+# kubeconfig backup created by flatten script
+.kube/config.bak
+**/*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+
+# Docker
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

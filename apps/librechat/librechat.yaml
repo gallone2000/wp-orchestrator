@@ -1,0 +1,28 @@
+version: 1.2.8
+
+cache: true
+
+endpoints:
+  custom:
+    - name: "Ollama"
+      apiKey: "ollama"
+      baseURL: "http://ollama:11434/v1/"
+      models:
+        default:
+          - "llama3.1:8b"
+        fetch: false
+      titleConvo: true
+      titleModel: "current_model"
+      summarize: false
+      modelDisplayLabel: "Ollama"
+
+mcpSettings:
+  allowedDomains:
+    - "wp-mcp"
+    - "http://wp-mcp:8000"
+    - "http://wp-mcp:8000/mcp"
+
+mcpServers:
+  wp-orchestrator:
+    type: streamable-http
+    url: "http://wp-mcp:8000/mcp"
