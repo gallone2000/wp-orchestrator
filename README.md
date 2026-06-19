@@ -1,70 +1,163 @@
 # wp-orchestrator
 
-MVP to create WordPress sites on Kubernetes via chatbot, without Helm.
+Deploy and manage WordPress sites on Kubernetes by chatting with an LLM.
+No Helm, no shell scripts — just natural language.
+
+## Architecture
+
+```
+User (browser)
+    │
+    ▼
+LibreChat UI  ──►  Ollama (llama3.1:8b)
+                        │
+                        │  MCP tool calls
+                        ▼
+                   wp-mcp (FastMCP server)
+                        │
+                        │  kubectl
+                        ▼
+                   Kubernetes cluster
+                        │
+                   ┌────┴────┐
+                 wp-<name>  wp-<name2>  ...
+               (namespace per site)
+```
+
+Each WordPress site lives in its own namespace (`wp-<name>`) and includes:
+MariaDB + WordPress deployments, PVCs, ClusterIP services, and an Nginx Ingress.
 
 ## Project layout
 
-- `manifests/`: parameterized YAML templates using `__PLACEHOLDER__` tokens
-- `mcp-server/`: FastAPI server exposing tool-style endpoints
+```
+wp-orchestrator/
+├── apps/
+│   └── librechat/
+│       ├── librechat.yaml          # LibreChat config (Ollama + MCP wiring)
+│       └── wp-tool-policy.prompt.txt  # system prompt / tool policy
+├── infra/
+│   └── compose/
+│       ├── docker-compose.yml      # full stack: LibreChat, Ollama, wp-mcp, MongoDB, ...
+│       └── .env.example            # environment template
+├── manifests/                      # parameterized YAML templates (__PLACEHOLDER__)
+│   ├── namespace.yaml.tpl
+│   ├── secrets.yaml.tpl
+│   ├── mariadb-pvc.yaml.tpl
+│   ├── wordpress-pvc.yaml.tpl
+│   ├── mariadb.yaml.tpl
+│   ├── wordpress.yaml.tpl
+│   └── ingress.yaml.tpl
+└── mcp-server/
+    ├── app/
+    │   ├── config.py               # settings from environment
+    │   ├── k8s.py                  # kubectl wrappers and deploy logic
+    │   ├── mcp_server.py           # FastMCP tool definitions (entrypoint)
+    │   ├── main.py                 # FastAPI REST endpoints (optional direct use)
+    │   └── models.py               # Pydantic request/response models
+    ├── Dockerfile
+    ├── requirements.txt
+    └── .env.example
+```
 
-## API tools
+## Prerequisites
 
-- `POST /tools/create_site`
-  ```json
-  { "name": "demo" }
+- [Docker](https://docs.docker.com/get-docker/) + Docker Compose v2
+- A running Kubernetes cluster reachable from the host (e.g. [Minikube](https://minikube.sigs.k8s.io/docs/start/))
+- `kubectl` configured with a valid context (`kubectl get ns` must work)
+- Minikube ingress addon enabled (if using Minikube):
+  ```bash
+  minikube addons enable ingress
   ```
-- `GET /tools/status_site/{name}`
-- `DELETE /tools/delete_site/{name}`
-
-Valid site name: lowercase letters, numbers, and `-`, up to 30 chars.
 
 ## Quick start
 
 ```bash
-cd mcp-server
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 1. clone and enter the project
+cd infra/compose
+
+# 2. create your local env file
+cp .env.example .env
 ```
 
-OpenAPI docs: `http://localhost:8000/docs`
+Edit `.env` and set at minimum:
 
-## LibreChat + Llama + MCP quick start
+| Variable | Description | Example |
+|---|---|---|
+| `HOST_KUBE_DIR` | path to your kubeconfig directory | `/home/your-user/.kube` |
+| `KUBE_CONTEXT` | kubectl context to use | `minikube` |
+| `BASE_DOMAIN` | base domain for site URLs | `192.168.49.2.nip.io` |
+
+> **Tip:** for a local Minikube setup use `BASE_DOMAIN=$(minikube ip).nip.io` — no `/etc/hosts` edits needed.
 
 ```bash
-cd infra/compose
-cp .env.example .env
-# edit .env and set HOST_KUBE_DIR to your local kubeconfig dir (usually ~/.kube)
-# if your kubeconfig has no current-context, set KUBE_CONTEXT explicitly
+# 3. start the full stack
 docker compose up -d --build
+
+# 4. pull the LLM model (first time only, ~5 GB)
 docker exec -it wp-ollama ollama pull llama3.1:8b
 ```
 
-LibreChat UI: `http://localhost:3080`
+Open LibreChat: **http://localhost:3080**
 
-### Tool policy prompt (recommended)
+## Tool policy prompt
 
-Use the policy file:
+For best results, paste the contents of `apps/librechat/wp-tool-policy.prompt.txt`
+into LibreChat system instructions or as the first message of a new conversation.
 
-`apps/librechat/wp-tool-policy.prompt.txt`
+This tells the model when to call each tool and how to format responses.
 
-Paste it into your LibreChat system instructions / agent instructions.
-If your current UI does not expose system instructions, paste it as the first message in a new conversation.
+## Available MCP tools
 
-## Runtime requirements
+| Tool | Description |
+|---|---|
+| `create_wordpress_site(name)` | Deploy a new WordPress site |
+| `get_wordpress_site_status(name)` | Get pod/PVC/ingress status |
+| `delete_wordpress_site(name)` | Delete the site namespace and all resources |
 
-- `kubectl` available in PATH
-- valid kubeconfig/context on the host running the server
-
-If `kubectl` inside `wp-mcp` falls back to `localhost:8080`, your kubeconfig has no active context.
-Set it in `infra/compose/.env`, for example:
-
-```bash
-KUBE_CONTEXT=<your-context-name>
-```
+**Site name rules:** lowercase letters, numbers, and `-` only; no leading/trailing dash; max 30 chars.
 
 ## Deployment conventions
 
-- namespace: `wp-<name>`
-- host: `<name>.<BASE_DOMAIN>`
+| Resource | Pattern |
+|---|---|
+| Namespace | `wp-<name>` |
+| Host | `<name>.<BASE_DOMAIN>` |
+| MariaDB secret | `mariadb-secret` (in namespace) |
+| WordPress secret | `wordpress-secret` (in namespace) |
+
+## Environment variables reference
+
+All variables are optional and fall back to sensible defaults.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HOST_KUBE_DIR` | — | **Required.** Host path mounted as `/root/.kube` in `wp-mcp` |
+| `KUBE_CONTEXT` | _(current-context)_ | kubectl context name |
+| `BASE_DOMAIN` | `wordpress.local` | Base domain for ingress hosts |
+| `INGRESS_CLASS_NAME` | `nginx` | Ingress class |
+| `MARIADB_IMAGE` | `mariadb:11.8.6` | MariaDB image |
+| `WORDPRESS_IMAGE` | `wordpress:php8.5-apache` | WordPress image |
+| `MARIADB_PVC_SIZE` | `1Gi` | MariaDB PVC size |
+| `WORDPRESS_PVC_SIZE` | `1Gi` | WordPress PVC size |
+
+## Troubleshooting
+
+**`kubectl` falls back to `localhost:8080`**
+Your kubeconfig has no active context. Set `KUBE_CONTEXT` in `infra/compose/.env` and restart `wp-mcp`:
+```bash
+docker compose up -d --force-recreate wp-mcp
+```
+
+**Site unreachable after creation**
+Ensure the ingress addon is enabled and `BASE_DOMAIN` matches your cluster IP.
+With Minikube:
+```bash
+minikube addons enable ingress
+kubectl get ingress -n wp-<name>   # ADDRESS column must be populated
+```
+
+**Minikube cert errors in `wp-mcp`**
+Embed certs into kubeconfig so the container can read them without external file paths:
+```bash
+kubectl config view --raw --flatten > ~/.kube/config
+```
