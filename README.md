@@ -15,7 +15,7 @@ LibreChat UI  ──►  Ollama (llama3.1:8b)
                         ▼
                    wp-mcp (FastMCP server)
                         │
-                        │  kubectl
+                        │  Kubernetes API
                         ▼
                    Kubernetes cluster
                         │
@@ -50,7 +50,7 @@ wp-orchestrator/
 └── mcp-server/
     ├── app/
     │   ├── config.py               # settings from environment
-    │   ├── k8s.py                  # kubectl wrappers and deploy logic
+    │   ├── k8s.py                  # Kubernetes API wrappers and deploy logic
     │   ├── mcp_server.py           # FastMCP tool definitions (entrypoint)
     │   ├── main.py                 # FastAPI REST endpoints (optional direct use)
     │   └── models.py               # Pydantic request/response models
@@ -63,7 +63,7 @@ wp-orchestrator/
 
 - [Docker](https://docs.docker.com/get-docker/) + Docker Compose v2
 - A running Kubernetes cluster reachable from the host (e.g. [Minikube](https://minikube.sigs.k8s.io/docs/start/))
-- `kubectl` configured with a valid context (`kubectl get ns` must work)
+- A valid kubeconfig mounted in `wp-mcp` (`KUBECONFIG=/root/.kube/config`) with a reachable context
 - Minikube ingress addon enabled (if using Minikube):
   ```bash
   minikube addons enable ingress
@@ -84,7 +84,7 @@ Edit `.env` and set at minimum:
 | Variable | Description | Example |
 |---|---|---|
 | `HOST_KUBE_DIR` | path to your kubeconfig directory | `/home/your-user/.kube` |
-| `KUBE_CONTEXT` | kubectl context to use | `minikube` |
+| `KUBE_CONTEXT` | kubeconfig context to use | `minikube` |
 | `BASE_DOMAIN` | base domain for site URLs | `192.168.49.2.nip.io` |
 
 > **Tip:** for a local Minikube setup use `BASE_DOMAIN=$(minikube ip).nip.io` — no `/etc/hosts` edits needed.
@@ -132,7 +132,7 @@ All variables are optional and fall back to sensible defaults.
 | Variable | Default | Description |
 |---|---|---|
 | `HOST_KUBE_DIR` | — | **Required.** Host path mounted as `/root/.kube` in `wp-mcp` |
-| `KUBE_CONTEXT` | _(current-context)_ | kubectl context name |
+| `KUBE_CONTEXT` | _(current-context)_ | kubeconfig context name |
 | `BASE_DOMAIN` | `wordpress.local` | Base domain for ingress hosts |
 | `INGRESS_CLASS_NAME` | `nginx` | Ingress class |
 | `MARIADB_IMAGE` | `mariadb:11.8.6` | MariaDB image |
@@ -142,8 +142,8 @@ All variables are optional and fall back to sensible defaults.
 
 ## Troubleshooting
 
-**`kubectl` falls back to `localhost:8080`**
-Your kubeconfig has no active context. Set `KUBE_CONTEXT` in `infra/compose/.env` and restart `wp-mcp`:
+**MCP server cannot load Kubernetes config/context**
+Set `KUBE_CONTEXT` in `infra/compose/.env` and restart `wp-mcp`:
 ```bash
 docker compose up -d --force-recreate wp-mcp
 ```

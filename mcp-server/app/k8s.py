@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import re
 import secrets
-import subprocess
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from kubernetes import client
+from kubernetes.client.rest import ApiException
+from kubernetes.config import ConfigException, load_kube_config
+from kubernetes.utils import FailToCreateError, create_from_yaml
 
 from .config import Settings
 
@@ -45,47 +51,85 @@ def make_site_spec(name: str, base_domain: str) -> SiteSpec:
     )
 
 
-def run_kubectl(args: list[str], *, stdin: str | None = None) -> str:
-    return run_kubectl_with_context(args, settings=None, stdin=stdin)
-
-
-def run_kubectl_with_context(args: list[str], *, settings: Settings | None, stdin: str | None = None) -> str:
-    command = ["kubectl"]
-    if settings and settings.kube_context:
-        command.extend(["--context", settings.kube_context])
-    command.extend(args)
-
-    completed = subprocess.run(
-        command,
-        input=stdin,
-        text=True,
-        capture_output=True,
-        check=False,
+def _build_config_error(settings: Settings, exc: Exception) -> RuntimeError:
+    context_hint = f" with context '{settings.kube_context}'" if settings.kube_context else ""
+    return RuntimeError(
+        f"Unable to load Kubernetes configuration{context_hint}: {exc}"
     )
-    if completed.returncode != 0:
-        error = completed.stderr.strip() or completed.stdout.strip() or "kubectl command failed"
-        if "localhost:8080" in error:
-            raise RuntimeError(
-                "Kubernetes context is not configured. "
-                "kubectl is trying localhost:8080. "
-                "Set a valid current-context in kubeconfig or set KUBE_CONTEXT for wp-mcp."
-            )
-        raise RuntimeError(f"kubectl {' '.join(args)} failed: {error}")
-    return completed.stdout.strip()
+
+
+def _build_api_error(action: str, exc: ApiException) -> RuntimeError:
+    detail = (exc.body or "").strip()
+    if detail:
+        return RuntimeError(f"{action} failed: {detail}")
+    return RuntimeError(f"{action} failed (HTTP {exc.status}).")
+
+
+def _build_api_client(settings: Settings) -> client.ApiClient:
+    try:
+        load_kube_config(context=settings.kube_context)
+    except ConfigException as exc:
+        raise _build_config_error(settings, exc) from exc
+    return client.ApiClient()
+
+
+def _apply_manifest(api_client: client.ApiClient, manifest: str) -> None:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as temp_file:
+        temp_file.write(manifest)
+        temp_path = Path(temp_file.name)
+    try:
+        create_from_yaml(api_client, str(temp_path), verbose=False)
+    except FailToCreateError as exc:
+        messages = [str(error).strip() for error in exc.api_exceptions if str(error).strip()]
+        reason = "; ".join(messages) if messages else str(exc)
+        raise RuntimeError(f"Failed to apply Kubernetes manifest: {reason}") from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _wait_for_deployment_ready(
+    apps_api: client.AppsV1Api,
+    namespace: str,
+    deployment_name: str,
+    *,
+    timeout_seconds: int = 300,
+    poll_seconds: float = 2.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            deployment = apps_api.read_namespaced_deployment(deployment_name, namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                time.sleep(poll_seconds)
+                continue
+            raise _build_api_error(f"Reading deployment '{deployment_name}'", exc) from exc
+
+        desired = deployment.spec.replicas or 0
+        ready = deployment.status.ready_replicas or 0
+        updated = deployment.status.updated_replicas or 0
+        available = deployment.status.available_replicas or 0
+        generation = deployment.metadata.generation or 0
+        observed = deployment.status.observed_generation or 0
+        if desired > 0 and ready >= desired and updated >= desired and available >= desired and observed >= generation:
+            return
+        time.sleep(poll_seconds)
+
+    raise RuntimeError(
+        f"Timeout waiting for deployment '{deployment_name}' in namespace '{namespace}' to become ready."
+    )
 
 
 def namespace_exists(namespace: str, settings: Settings) -> bool:
-    command = ["kubectl"]
-    if settings.kube_context:
-        command.extend(["--context", settings.kube_context])
-    command.extend(["get", "namespace", namespace])
-    completed = subprocess.run(
-        command,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return completed.returncode == 0
+    with _build_api_client(settings) as api_client:
+        core_v1 = client.CoreV1Api(api_client)
+        try:
+            core_v1.read_namespace(namespace)
+            return True
+        except ApiException as exc:
+            if exc.status == 404:
+                return False
+            raise _build_api_error(f"Reading namespace '{namespace}'", exc) from exc
 
 
 def render_template(template_path: Path, context: dict[str, str]) -> str:
@@ -128,23 +172,117 @@ def create_site(spec: SiteSpec, settings: Settings) -> None:
         raise ValueError(f"Namespace '{spec.namespace}' already exists.")
 
     context = build_context(spec, settings)
-    for template_name in TEMPLATE_ORDER:
-        template_path = settings.manifests_dir / template_name
-        manifest = render_template(template_path, context)
-        run_kubectl_with_context(["apply", "-f", "-"], settings=settings, stdin=manifest)
+    with _build_api_client(settings) as api_client:
+        apps_v1 = client.AppsV1Api(api_client)
+        for template_name in TEMPLATE_ORDER:
+            template_path = settings.manifests_dir / template_name
+            manifest = render_template(template_path, context)
+            _apply_manifest(api_client, manifest)
 
-    run_kubectl_with_context(["rollout", "status", "deployment/mariadb", "-n", spec.namespace], settings=settings)
-    run_kubectl_with_context(["rollout", "status", "deployment/wordpress", "-n", spec.namespace], settings=settings)
+        _wait_for_deployment_ready(apps_v1, spec.namespace, "mariadb")
+        _wait_for_deployment_ready(apps_v1, spec.namespace, "wordpress")
+
+
+def _format_pod_rows(pods: list[client.V1Pod]) -> str:
+    lines = ["NAME\tREADY\tSTATUS\tRESTARTS"]
+    for pod in sorted(pods, key=lambda item: item.metadata.name):
+        statuses = pod.status.container_statuses or []
+        ready_count = sum(1 for status in statuses if status.ready)
+        total_count = len(statuses)
+        restarts = sum(status.restart_count for status in statuses)
+        status = pod.status.phase or "Unknown"
+        lines.append(f"{pod.metadata.name}\t{ready_count}/{total_count}\t{status}\t{restarts}")
+    return "\n".join(lines)
+
+
+def _format_service_rows(services: list[client.V1Service]) -> str:
+    lines = ["NAME\tTYPE\tCLUSTER-IP\tPORT(S)"]
+    for service in sorted(services, key=lambda item: item.metadata.name):
+        ports = ",".join(
+            f"{port.port}/{(port.protocol or 'TCP').lower()}" for port in (service.spec.ports or [])
+        )
+        lines.append(
+            f"{service.metadata.name}\t{service.spec.type or 'ClusterIP'}\t{service.spec.cluster_ip or '-'}\t{ports or '-'}"
+        )
+    return "\n".join(lines)
+
+
+def _format_deployment_rows(deployments: list[client.V1Deployment]) -> str:
+    lines = ["NAME\tREADY\tUP-TO-DATE\tAVAILABLE"]
+    for deployment in sorted(deployments, key=lambda item: item.metadata.name):
+        desired = deployment.spec.replicas or 0
+        ready = deployment.status.ready_replicas or 0
+        updated = deployment.status.updated_replicas or 0
+        available = deployment.status.available_replicas or 0
+        lines.append(f"{deployment.metadata.name}\t{ready}/{desired}\t{updated}\t{available}")
+    return "\n".join(lines)
+
+
+def _format_pvc_rows(pvcs: list[client.V1PersistentVolumeClaim]) -> str:
+    lines = ["NAME\tSTATUS\tVOLUME\tCAPACITY\tACCESS MODES"]
+    for pvc in sorted(pvcs, key=lambda item: item.metadata.name):
+        capacity = (pvc.status.capacity or {}).get("storage", "-")
+        modes = ",".join(pvc.status.access_modes or [])
+        lines.append(
+            f"{pvc.metadata.name}\t{pvc.status.phase or 'Unknown'}\t{pvc.spec.volume_name or '-'}\t{capacity}\t{modes or '-'}"
+        )
+    return "\n".join(lines)
+
+
+def _format_ingress_rows(ingresses: list[client.V1Ingress]) -> str:
+    lines = ["NAME\tCLASS\tHOSTS\tADDRESS"]
+    for ingress in sorted(ingresses, key=lambda item: item.metadata.name):
+        hosts = ",".join(rule.host for rule in (ingress.spec.rules or []) if rule.host)
+        addresses = []
+        for status in ingress.status.load_balancer.ingress or [] if ingress.status and ingress.status.load_balancer else []:
+            if status.ip:
+                addresses.append(status.ip)
+            elif status.hostname:
+                addresses.append(status.hostname)
+        lines.append(
+            f"{ingress.metadata.name}\t{ingress.spec.ingress_class_name or '-'}\t{hosts or '-'}\t{','.join(addresses) or '-'}"
+        )
+    return "\n".join(lines)
 
 
 def status_site(spec: SiteSpec, settings: Settings) -> tuple[str, str, str]:
     if not namespace_exists(spec.namespace, settings):
         raise ValueError(f"Site '{spec.name}' does not exist (namespace '{spec.namespace}' not found).")
-    resources = run_kubectl_with_context(["get", "all", "-n", spec.namespace], settings=settings)
-    pvc = run_kubectl_with_context(["get", "pvc", "-n", spec.namespace], settings=settings)
-    ingress = run_kubectl_with_context(["get", "ingress", "-n", spec.namespace], settings=settings)
+
+    with _build_api_client(settings) as api_client:
+        core_v1 = client.CoreV1Api(api_client)
+        apps_v1 = client.AppsV1Api(api_client)
+        networking_v1 = client.NetworkingV1Api(api_client)
+        try:
+            pods = core_v1.list_namespaced_pod(spec.namespace).items
+            services = core_v1.list_namespaced_service(spec.namespace).items
+            deployments = apps_v1.list_namespaced_deployment(spec.namespace).items
+            pvcs = core_v1.list_namespaced_persistent_volume_claim(spec.namespace).items
+            ingresses = networking_v1.list_namespaced_ingress(spec.namespace).items
+        except ApiException as exc:
+            raise _build_api_error(f"Reading resources for namespace '{spec.namespace}'", exc) from exc
+
+    resources = "\n\n".join(
+        (
+            _format_pod_rows(pods),
+            _format_service_rows(services),
+            _format_deployment_rows(deployments),
+        )
+    )
+    pvc = _format_pvc_rows(pvcs)
+    ingress = _format_ingress_rows(ingresses)
     return resources, pvc, ingress
 
 
 def delete_site(spec: SiteSpec, settings: Settings) -> None:
-    run_kubectl_with_context(["delete", "namespace", spec.namespace, "--ignore-not-found=true"], settings=settings)
+    with _build_api_client(settings) as api_client:
+        core_v1 = client.CoreV1Api(api_client)
+        try:
+            core_v1.delete_namespace(
+                name=spec.namespace,
+                body=client.V1DeleteOptions(propagation_policy="Foreground"),
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return
+            raise _build_api_error(f"Deleting namespace '{spec.namespace}'", exc) from exc
