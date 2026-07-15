@@ -18,15 +18,23 @@ def create_wordpress_site(name: str) -> dict:
 
     Use this tool when the user asks to create or deploy a WordPress site/blog.
     """
-    spec = make_site_spec(name, settings.base_domain)
-    create_site(spec, settings)
-    return {
-        "name": spec.name,
-        "namespace": spec.namespace,
-        "host": spec.host,
-        "url": f"http://{spec.host}",
-        "message": "Site creation requested. Use get_wordpress_site_status to track readiness.",
-    }
+    try:
+        spec = make_site_spec(name, settings.base_domain)
+        create_site(spec, settings)
+        return {
+            "ok": True,
+            "name": spec.name,
+            "namespace": spec.namespace,
+            "host": spec.host,
+            "url": f"http://{spec.host}",
+            "message": "Site creation requested. Use get_wordpress_site_status to track readiness.",
+        }
+    except (ValueError, RuntimeError) as exc:
+        return {
+            "ok": False,
+            "name": name.strip().lower(),
+            "error": str(exc),
+        }
 
 
 @mcp.tool
@@ -36,16 +44,24 @@ def get_wordpress_site_status(name: str) -> dict:
 
     Use this tool when the user asks for health/status/troubleshooting of a site.
     """
-    spec = make_site_spec(name, settings.base_domain)
-    resources, pvc, ingress = status_site(spec, settings)
-    return {
-        "name": spec.name,
-        "namespace": spec.namespace,
-        "host": spec.host,
-        "resources": resources,
-        "pvc": pvc,
-        "ingress": ingress,
-    }
+    try:
+        spec = make_site_spec(name, settings.base_domain)
+        resources, pvc, ingress = status_site(spec, settings)
+        return {
+            "ok": True,
+            "name": spec.name,
+            "namespace": spec.namespace,
+            "host": spec.host,
+            "resources": resources,
+            "pvc": pvc,
+            "ingress": ingress,
+        }
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "name": name.strip().lower(),
+            "error": str(exc),
+        }
 
 
 @mcp.tool
@@ -55,14 +71,22 @@ def delete_wordpress_site(name: str) -> dict:
 
     Use this tool when the user explicitly asks to remove/delete a site.
     """
-    spec = make_site_spec(name, settings.base_domain)
-    delete_site(spec, settings)
-    return {
-        "name": spec.name,
-        "namespace": spec.namespace,
-        "host": spec.host,
-        "message": "Namespace deletion requested.",
-    }
+    try:
+        spec = make_site_spec(name, settings.base_domain)
+        delete_site(spec, settings)
+        return {
+            "ok": True,
+            "name": spec.name,
+            "namespace": spec.namespace,
+            "host": spec.host,
+            "message": "Namespace deletion requested.",
+        }
+    except (ValueError, RuntimeError) as exc:
+        return {
+            "ok": False,
+            "name": name.strip().lower(),
+            "error": str(exc),
+        }
 
 
 def main() -> None:
