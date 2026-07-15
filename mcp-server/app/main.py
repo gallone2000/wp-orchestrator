@@ -24,7 +24,7 @@ def create_site_tool(payload: CreateSiteRequest) -> SiteResponse:
             name=spec.name,
             namespace=spec.namespace,
             host=spec.host,
-            message=f"Site created. URL: http://{spec.host}",
+            message=f"Site creation requested. URL: http://{spec.host}. Check status endpoint for readiness.",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

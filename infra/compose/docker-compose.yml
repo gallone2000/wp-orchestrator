@@ -37,7 +37,7 @@ services:
 
   mongodb:
     container_name: wp-librechat-mongodb
-    image: mongo:8.0.17
+    image: mongo:8.0.26
     restart: unless-stopped
     command: mongod --noauth
     volumes:
@@ -112,8 +112,9 @@ services:
     expose:
       - "8000"
     networks:
-      - default
-      - minikube-net
+      default: {}
+      minikube-net:
+        ipv4_address: 192.168.49.10
 
 volumes:
   mongodb-data:

@@ -25,7 +25,7 @@ def create_wordpress_site(name: str) -> dict:
         "namespace": spec.namespace,
         "host": spec.host,
         "url": f"http://{spec.host}",
-        "message": "Site created successfully.",
+        "message": "Site creation requested. Use get_wordpress_site_status to track readiness.",
     }
 
 

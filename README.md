@@ -99,6 +99,25 @@ docker exec -it wp-ollama ollama pull llama3.1:8b
 
 Open LibreChat: **http://localhost:3080**
 
+### Quick start with Makefile (from repository root)
+
+```bash
+make init-env
+make minikube-start
+make minikube-enable-ingress
+make minikube-wait-ingress
+make set-base-domain
+make compose-up
+make pull-model
+make status
+```
+
+Or run everything in one command:
+
+```bash
+make bootstrap
+```
+
 ## Tool policy prompt
 
 For best results, paste the contents of `apps/librechat/wp-tool-policy.prompt.txt`
@@ -113,6 +132,8 @@ This tells the model when to call each tool and how to format responses.
 | `create_wordpress_site(name)` | Deploy a new WordPress site |
 | `get_wordpress_site_status(name)` | Get pod/PVC/ingress status |
 | `delete_wordpress_site(name)` | Delete the site namespace and all resources |
+
+`create_wordpress_site` returns immediately after applying manifests. Use `get_wordpress_site_status` to monitor readiness.
 
 **Site name rules:** lowercase letters, numbers, and `-` only; no leading/trailing dash; max 30 chars.
 

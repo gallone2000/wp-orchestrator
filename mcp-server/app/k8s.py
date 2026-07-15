@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 import secrets
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,39 +86,6 @@ def _apply_manifest(api_client: client.ApiClient, manifest: str) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def _wait_for_deployment_ready(
-    apps_api: client.AppsV1Api,
-    namespace: str,
-    deployment_name: str,
-    *,
-    timeout_seconds: int = 300,
-    poll_seconds: float = 2.0,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        try:
-            deployment = apps_api.read_namespaced_deployment(deployment_name, namespace)
-        except ApiException as exc:
-            if exc.status == 404:
-                time.sleep(poll_seconds)
-                continue
-            raise _build_api_error(f"Reading deployment '{deployment_name}'", exc) from exc
-
-        desired = deployment.spec.replicas or 0
-        ready = deployment.status.ready_replicas or 0
-        updated = deployment.status.updated_replicas or 0
-        available = deployment.status.available_replicas or 0
-        generation = deployment.metadata.generation or 0
-        observed = deployment.status.observed_generation or 0
-        if desired > 0 and ready >= desired and updated >= desired and available >= desired and observed >= generation:
-            return
-        time.sleep(poll_seconds)
-
-    raise RuntimeError(
-        f"Timeout waiting for deployment '{deployment_name}' in namespace '{namespace}' to become ready."
-    )
-
-
 def namespace_exists(namespace: str, settings: Settings) -> bool:
     with _build_api_client(settings) as api_client:
         core_v1 = client.CoreV1Api(api_client)
@@ -173,14 +139,10 @@ def create_site(spec: SiteSpec, settings: Settings) -> None:
 
     context = build_context(spec, settings)
     with _build_api_client(settings) as api_client:
-        apps_v1 = client.AppsV1Api(api_client)
         for template_name in TEMPLATE_ORDER:
             template_path = settings.manifests_dir / template_name
             manifest = render_template(template_path, context)
             _apply_manifest(api_client, manifest)
-
-        _wait_for_deployment_ready(apps_v1, spec.namespace, "mariadb")
-        _wait_for_deployment_ready(apps_v1, spec.namespace, "wordpress")
 
 
 def _format_pod_rows(pods: list[client.V1Pod]) -> str:
